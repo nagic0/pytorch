@@ -2,6 +2,7 @@
 #include <ATen/MapAllocator.h>
 #include <ATen/StorageUtils.h>
 #include <c10/core/TensorOptions.h>
+#include "ATen/native/UsmShare.h"
 
 namespace at {
 
@@ -51,6 +52,13 @@ C10_EXPORT void share_memory_(TensorBase& t) {
   c10::StorageImpl* newStorageImpl = newStorage.unsafeGetStorageImpl();
   origStorageImpl->set_data_ptr(std::move(newStorageImpl->mutable_data_ptr()));
   origStorageImpl->set_allocator(newStorageImpl->allocator());
+}
+
+C10_EXPORT c10::Storage storage_usm_share(
+    const c10::Storage& src,
+    const c10::Device& device) {
+  // Use dispatch stub to call device-specific implementation
+  return at::native::usm_share_stub(device.type(), src, device);
 }
 
 } // namespace at
