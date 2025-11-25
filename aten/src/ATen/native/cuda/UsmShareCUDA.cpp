@@ -70,18 +70,19 @@ static c10::Storage storage_usm_share_cuda(
 
   struct DeleterContext {
     c10::StorageImpl* src_impl{};
-    void* data{};
+    void* host_ptr{};  // Original CPU pointer for unregister
+    void* device_ptr{};  // Device pointer (not used in deleter, just for reference)
     c10::Device device;
   };
 
-  auto* deleter_context = new DeleterContext{src_impl, shared_ptr, device};
+  auto* deleter_context = new DeleterContext{src_impl, src_ptr, shared_ptr, device};
 
   c10::DeleterFnPtr deleter = [](void* ctx) {
     auto* context = static_cast<DeleterContext*>(ctx);
     // Set device guard
     c10::cuda::CUDAGuard device_guard(context->device);
-    // Unregister the host memory
-    cudaError_t err = cudaHostUnregister(context->data);
+    // Unregister the host memory using the original host pointer
+    cudaError_t err = cudaHostUnregister(context->host_ptr);
     if (err != cudaSuccess) {
       TORCH_WARN(
           "usm_share_cuda: cudaHostUnregister failed on device ",

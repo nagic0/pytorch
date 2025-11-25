@@ -186,7 +186,6 @@ void UsmAllocator::close() {
   if (munmap(base_ptr_, size_)) {
     TORCH_CHECK(false, "could not unmap the USM memory: ", c10::utils::str_error(errno), " (", errno, ")");
   }
-  std::cout << "USM: unmapped memory of size " << size_ << " at " << base_ptr_ << "\n";
 #endif
 }
 
