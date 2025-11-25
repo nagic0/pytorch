@@ -658,8 +658,7 @@ static PyMethodDef THPStorage_methods[] = {
     {"usm_share_",
      castPyCFunctionWithKeywords(THPStorage_usm_share_),
      METH_VARARGS | METH_KEYWORDS,
-     nullptr
-    },
+     nullptr},
     {"element_size", THPStorage_elementSize, METH_NOARGS, nullptr},
     {"fill_", THPStorage_fill_, METH_O, nullptr},
     {"new", THPStorage_new, METH_NOARGS, nullptr},
