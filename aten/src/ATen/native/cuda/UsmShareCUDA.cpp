@@ -22,6 +22,15 @@ static c10::Storage storage_usm_share_cuda(
       "usm_share_cuda: target device must be CUDA, got: ",
       device);
   
+  // Handle empty storage
+  if (src_bytes == 0) {
+    return c10::Storage(c10::make_intrusive<c10::StorageImpl>(
+        c10::StorageImpl::use_byte_size_t(),
+        0,
+        c10::GetAllocator(c10::DeviceType::CUDA),
+        /* resizable */ false));
+  }
+  
   // Set device
   c10::cuda::CUDAGuard device_guard(device);
 
