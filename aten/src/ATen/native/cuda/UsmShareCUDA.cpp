@@ -33,13 +33,16 @@ static c10::Storage storage_usm_share_cuda(
   
   // Set device
   c10::cuda::CUDAGuard device_guard(device);
+  
+  // Normalize device to actual device index (handle device.index() == -1 case)
+  c10::Device actual_device = device_guard.current_device();
 
   // Check device usm support
-  auto device_properties = at::cuda::getDeviceProperties(device.index());
+  auto device_properties = at::cuda::getDeviceProperties(actual_device.index());
   TORCH_CHECK(
       device_properties->integrated,
       "usm_share_cuda: target device does not support USM (not integrated GPU): ",
-      device);
+      actual_device);
 
   // Create shared memory using CUDA for usm devices
   // The memory will be accessible from both host and the target device
@@ -49,7 +52,7 @@ static c10::Storage storage_usm_share_cuda(
       "usm_share_cuda: cudaHostRegister failed for size ",
       src_bytes,
       " on device ",
-      device,
+      actual_device,
       " with error: ",
       cudaGetErrorString(err));
 
@@ -60,7 +63,7 @@ static c10::Storage storage_usm_share_cuda(
       "usm_share_cuda: cudaHostGetDevicePointer failed for size ",
       src_bytes,
       " on device ",
-      device,
+      actual_device,
       " with error: ",
       cudaGetErrorString(err));
 
@@ -69,7 +72,7 @@ static c10::Storage storage_usm_share_cuda(
       "usm_share_cuda: failed to create shared memory of size ",
       src_bytes,
       " on device ",
-      device);
+      actual_device);
   
   // Create a new storage with a custom deleter that also updates src metadata
   c10::StorageImpl* src_impl = src.unsafeGetStorageImpl();
@@ -84,7 +87,7 @@ static c10::Storage storage_usm_share_cuda(
     c10::Device device;
   };
 
-  auto* deleter_context = new DeleterContext{src_impl, src_ptr, shared_ptr, device};
+  auto* deleter_context = new DeleterContext{src_impl, src_ptr, shared_ptr, actual_device};
 
   c10::DeleterFnPtr deleter = [](void* ctx) {
     auto* context = static_cast<DeleterContext*>(ctx);
@@ -104,7 +107,7 @@ static c10::Storage storage_usm_share_cuda(
     delete context;
   };
 
-  auto data_ptr = c10::DataPtr(shared_ptr, deleter_context, deleter, device);
+  auto data_ptr = c10::DataPtr(shared_ptr, deleter_context, deleter, actual_device);
 
   auto new_storage_impl = c10::make_intrusive<c10::StorageImpl>(
       c10::StorageImpl::use_byte_size_t(),
