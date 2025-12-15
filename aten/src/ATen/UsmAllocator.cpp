@@ -13,6 +13,73 @@ static void deleteUsmAllocator(void* ptr) {
   delete static_cast<UsmAllocator*>(ptr);
 }
 
+namespace {
+// Read up to `size` bytes in a loop, handling EINTR and partial reads.
+// Returns number of bytes read (may be less than `size` on EOF), or -1 on error.
+static ssize_t read_full_loop(int fd, void* buf, size_t size) {
+  size_t remaining = size;
+  size_t offset = 0;
+  while (remaining > 0) {
+    ssize_t r = ::read(fd, static_cast<char*>(buf) + offset, remaining);
+    if (r < 0) {
+      if (errno == EINTR) continue;
+      return -1;
+    }
+    if (r == 0) break; // EOF
+    offset += static_cast<size_t>(r);
+    remaining -= static_cast<size_t>(r);
+  }
+  return static_cast<ssize_t>(offset);
+}
+
+// Try to read `dio_size` bytes (for direct I/O) then fall back to reading
+// `regular_size` bytes (non-DIO) if the dio attempt fails with an error.
+static bool read_with_fd_fallback(int fd, void* dest, size_t dio_size, size_t regular_size, std::string_view filename) {
+  ssize_t r = read_full_loop(fd, dest, dio_size);
+  if (r > 0) return true;
+  if (r < 0) {
+    TORCH_WARN("USM read failed with provided fd for file ", filename,
+               " (fd=", fd, "): ", c10::utils::str_error(errno), " (", errno, ")");
+    lseek(fd, 0, SEEK_SET);
+    r = read_full_loop(fd, dest, regular_size);
+    if (r > 0) return true;
+    TORCH_WARN("USM fallback read also failed for fd ", fd,
+               ": ", c10::utils::str_error(errno), " (", errno, ")");
+    return false;
+  }
+  // r == 0 (EOF) treated as failure for our use-case
+  return false;
+}
+
+// Open file with `open_flags` and read into `dest` with sizes, falling back
+// to non-DIO open/read if DIO fails.
+static bool open_and_read_with_fallback(const std::string& filename, int open_flags, void* dest, size_t dio_size, size_t regular_size) {
+  int fd = open(filename.c_str(), open_flags);
+  if (fd < 0) return false;
+  ssize_t r = read_full_loop(fd, dest, dio_size);
+  if (r > 0) { ::close(fd); return true; }
+  int saved_errno = errno;
+  ::close(fd);
+
+  TORCH_WARN("USM DIO read failed for file ", filename,
+             ": ", c10::utils::str_error(saved_errno), " (", saved_errno, ")");
+
+  // Fallback to regular read
+  int regular_fd = open(filename.c_str(), O_RDONLY);
+  if (regular_fd < 0) {
+    TORCH_WARN("USM failed to open file for regular read: ", filename,
+               ": ", c10::utils::str_error(errno), " (", errno, ")");
+    return false;
+  }
+  r = read_full_loop(regular_fd, dest, regular_size);
+  ::close(regular_fd);
+  if (r > 0) return true;
+  TORCH_WARN("USM regular read also failed for file ", filename,
+             ": ", c10::utils::str_error(errno), " (", errno, ")");
+  return false;
+}
+} // namespace
+
 UsmAllocator::UsmAllocator(WithFd, std::string_view filename, int fd, size_t size)
   : filename_(filename.empty() ? "usmalloc" : filename)
   , size_(0) // to be filled later
@@ -53,176 +120,25 @@ UsmAllocator::UsmAllocator(WithFd, std::string_view filename, int fd, size_t siz
   bool read_success = false;
   if (fd >= 0) {
     // Use the provided file descriptor
-    // Try to enable direct I/O on the existing fd (may not work)
     int dio_flags = fcntl(fd, F_GETFL);
     if (dio_flags >= 0) {
       fcntl(fd, F_SETFL, dio_flags | O_DIRECT);
     }
 
     size_t read_size = std::min(size, aligned_size);
-    // For DIO, ensure read_size is 512-byte aligned
     size_t dio_aligned_read_size = (read_size + 511) & ~511;
-    if (dio_aligned_read_size > aligned_size) {
-      dio_aligned_read_size = aligned_size;
-    }
+    if (dio_aligned_read_size > aligned_size) dio_aligned_read_size = aligned_size;
 
-    // Attempt DIO-sized read in a loop until complete, error, or EOF
-    ssize_t last_ret = 0;
-    size_t remaining = dio_aligned_read_size;
-    size_t offset = 0;
-    while (remaining > 0) {
-      last_ret = ::read(fd, static_cast<char*>(base_ptr_) + offset, remaining);
-      if (last_ret < 0) {
-        if (errno == EINTR) continue;
-        break;
-      }
-      if (last_ret == 0) break; // EOF
-      offset += static_cast<size_t>(last_ret);
-      remaining -= static_cast<size_t>(last_ret);
-    }
-
-    if (offset > 0) {
-      read_success = true;
-    }
-
-    // If DIO attempt failed (error and nothing read), try fallback without DIO
-    if (!read_success && last_ret < 0) {
-      TORCH_WARN("USM read failed with provided fd for file ", filename_,
-                 " (fd=", fd, ", base_ptr=", base_ptr_,
-                 ", size=", size, ", aligned_size=", aligned_size,
-                 ", read_size=", read_size, ", dio_aligned_read_size=", dio_aligned_read_size, "): ",
-                 c10::utils::str_error(errno), " (", errno, ")");
-
-      lseek(fd, 0, SEEK_SET); // Reset file position
-
-      // Read regular size in a loop
-      remaining = read_size;
-      offset = 0;
-      last_ret = 0;
-      while (remaining > 0) {
-        last_ret = ::read(fd, static_cast<char*>(base_ptr_) + offset, remaining);
-        if (last_ret < 0) {
-          if (errno == EINTR) continue;
-          break;
-        }
-        if (last_ret == 0) break; // EOF
-        offset += static_cast<size_t>(last_ret);
-        remaining -= static_cast<size_t>(last_ret);
-      }
-      if (offset > 0) {
-        read_success = true;
-      } else {
-        TORCH_WARN("USM fallback read also failed for fd ", fd,
-                   ": ", c10::utils::str_error(errno), " (", errno, ")");
-      }
-    }
+    read_success = read_with_fd_fallback(fd, base_ptr_, dio_aligned_read_size, read_size, filename_);
   } else if (!filename_.empty() && filename_ != "usmalloc") {
-    // Open file with DIO
-    int file_fd = open(filename_.c_str(), O_RDONLY | O_DIRECT);
-    if (file_fd >= 0) {
-      size_t read_size = std::min(size, aligned_size);
-      // For DIO, ensure read_size is 512-byte aligned
-      size_t dio_aligned_read_size = (read_size + 511) & ~511;
-      if (dio_aligned_read_size > aligned_size) {
-        dio_aligned_read_size = aligned_size;
-      }
+    size_t read_size = std::min(size, aligned_size);
+    size_t dio_aligned_read_size = (read_size + 511) & ~511;
+    if (dio_aligned_read_size > aligned_size) dio_aligned_read_size = aligned_size;
 
-      // Attempt DIO-sized read in a loop
-      ssize_t last_ret = 0;
-      size_t remaining = dio_aligned_read_size;
-      size_t offset = 0;
-      while (remaining > 0) {
-        last_ret = ::read(file_fd, static_cast<char*>(base_ptr_) + offset, remaining);
-        if (last_ret < 0) {
-          if (errno == EINTR) continue;
-          break;
-        }
-        if (last_ret == 0) break; // EOF
-        offset += static_cast<size_t>(last_ret);
-        remaining -= static_cast<size_t>(last_ret);
-      }
-
-      if (offset > 0) {
-        ::close(file_fd);
-        read_success = true;
-      }
-
-      if (!read_success && last_ret < 0) {
-        // DIO failed, log error and try fallback
-        int dio_errno = errno;
-        ::close(file_fd);
-        TORCH_WARN("USM DIO read failed for file ", filename_,
-                   " (fd=", file_fd, ", base_ptr=", base_ptr_,
-                   ", size=", size, ", aligned_size=", aligned_size,
-                   ", read_size=", read_size, ", dio_aligned_read_size=", dio_aligned_read_size, "): ",
-                   c10::utils::str_error(dio_errno), " (", dio_errno, ")");
-
-        // Fallback to regular file read (looped)
-        int regular_fd = open(filename_.c_str(), O_RDONLY);
-        if (regular_fd >= 0) {
-          remaining = read_size;
-          offset = 0;
-          last_ret = 0;
-          while (remaining > 0) {
-            last_ret = ::read(regular_fd, static_cast<char*>(base_ptr_) + offset, remaining);
-            if (last_ret < 0) {
-              if (errno == EINTR) continue;
-              break;
-            }
-            if (last_ret == 0) break; // EOF
-            offset += static_cast<size_t>(last_ret);
-            remaining -= static_cast<size_t>(last_ret);
-          }
-          ::close(regular_fd);
-          if (offset > 0) {
-            read_success = true;
-            TORCH_WARN("USM fallback to regular read succeeded for file ", filename_,
-                       " (bytes_read=", offset, ")");
-          } else {
-            TORCH_WARN("USM regular read also failed for file ", filename_,
-                       ": ", c10::utils::str_error(errno), " (", errno, ")");
-          }
-        } else {
-          TORCH_WARN("USM failed to open file for regular read: ", filename_,
-                     ": ", c10::utils::str_error(errno), " (", errno, ")");
-        }
-      }
-    } else {
-      // DIO open failed, try regular file read
-      int dio_errno = errno;
-      TORCH_WARN("USM failed to open file with DIO: ", filename_,
-                 ": ", c10::utils::str_error(dio_errno), " (", dio_errno, ")");
-
-      // Fallback to regular file read if DIO fails (looped)
-      int regular_fd = open(filename_.c_str(), O_RDONLY);
-      if (regular_fd >= 0) {
-        size_t read_size = std::min(size, aligned_size);
-        ssize_t last_ret = 0;
-        size_t remaining = read_size;
-        size_t offset = 0;
-        while (remaining > 0) {
-          last_ret = ::read(regular_fd, static_cast<char*>(base_ptr_) + offset, remaining);
-          if (last_ret < 0) {
-            if (errno == EINTR) continue;
-            break;
-          }
-          if (last_ret == 0) break; // EOF
-          offset += static_cast<size_t>(last_ret);
-          remaining -= static_cast<size_t>(last_ret);
-        }
-        ::close(regular_fd);
-        if (offset > 0) {
-          read_success = true;
-          TORCH_WARN("USM fallback to regular read succeeded for file ", filename_,
-                     " (bytes_read=", offset, ")");
-        } else {
-          TORCH_WARN("USM regular read failed for file ", filename_,
-                     ": ", c10::utils::str_error(errno), " (", errno, ")");
-        }
-      } else {
-        TORCH_WARN("USM failed to open file for regular read: ", filename_,
-                   ": ", c10::utils::str_error(errno), " (", errno, ")");
-      }
+    // Try open with O_DIRECT and fallback to regular open/read inside helper
+    read_success = open_and_read_with_fallback(std::string(filename_), O_RDONLY | O_DIRECT, base_ptr_, dio_aligned_read_size, read_size);
+    if (read_success) {
+      // success already logged if it was fallback
     }
   } else {
     // No file to read, just return the allocated memory
