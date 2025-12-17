@@ -7,15 +7,15 @@ namespace at::native {
 
 // Implementation for CUDA backend
 // self: dummy tensor on CUDA device (carries device info)
-// src:  wrapped tensor on CPU containing the data
-Tensor usm_share_from_cuda(const Tensor& self, const Tensor& src) {
+// src:  CPU storage containing the data
+Tensor usm_share_from_cuda(const Tensor& self, const c10::Storage& src) {
   void* src_ptr = src.data_ptr();
   size_t src_bytes = src.nbytes();
   c10::Device target_device = self.device();
 
   TORCH_CHECK(
       src.device().is_cpu(),
-      "usm_share_from_cuda: source tensor must be on CPU, got: ",
+      "usm_share_from_cuda: source storage must be on CPU, got: ",
       src.device());
   TORCH_CHECK(
       target_device.type() == c10::DeviceType::CUDA,

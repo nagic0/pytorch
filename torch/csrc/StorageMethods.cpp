@@ -134,7 +134,7 @@ static PyObject* THPStorage_usm_share_(
 
   // TODO: add usm device check
   
-  at::Storage result = at::storage_usm_share(self_, device);
+  at::Storage result = at::usm_share(self_, device);
 
   return THPStorage_Wrap(std::move(result));
 

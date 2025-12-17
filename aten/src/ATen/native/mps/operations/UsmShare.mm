@@ -5,13 +5,13 @@
 namespace at::native {
 
 // Implementation for MPS backend
-Tensor usm_share_from_mps(const Tensor& self, const Tensor& src) {
+Tensor usm_share_from_mps(const Tensor& self, const c10::Storage& src) {
   void* ptr = src.data_ptr();
   size_t size = src.nbytes();
 
   TORCH_CHECK(
       src.device().is_cpu(),
-      "usm_share_from_mps: source tensor must be on CPU, got: ",
+      "usm_share_from_mps: source storage must be on CPU, got: ",
       src.device());
   TORCH_CHECK(
       self.device().type() == c10::DeviceType::MPS,

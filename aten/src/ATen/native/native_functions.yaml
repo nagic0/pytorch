@@ -15941,13 +15941,11 @@
 - func: _propagate_xla_data(Tensor input, Tensor output) -> ()
   variants: function
 
-# Internal native function for USM (Unified Shared Memory) sharing
+# Native function for USM (Unified Shared Memory) sharing
 # 'self' is a dummy tensor on the target device (carries device info)
-# 'src' is the CPU tensor containing the data to share
-- func: _usm_share_from(Tensor self, Tensor src) -> Tensor
+# 'src' is the CPU storage containing the data to share
+- func: _usm_share_from(Tensor self, Storage src) -> Tensor
   variants: function
   dispatch:
-    # HIP: usm_share_from_hip
-    # MPS: usm_share_from_mps
     CUDA: usm_share_from_cuda
-    XPU: usm_share_from_xpu
+    MPS: usm_share_from_mps
