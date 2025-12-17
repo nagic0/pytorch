@@ -54,11 +54,28 @@ C10_EXPORT void share_memory_(TensorBase& t) {
   origStorageImpl->set_allocator(newStorageImpl->allocator());
 }
 
-C10_EXPORT c10::Storage storage_usm_share(
+C10_EXPORT c10::Storage usm_share(
     const c10::Storage& src,
     const c10::Device& device) {
-  // Use dispatch stub to call device-specific implementation
-  return at::native::usm_share_stub(device.type(), src, device);
+  // 1. Validate Source
+  TORCH_CHECK(src.device().is_cpu(), "usm_share: source storage must be on CPU");
+  
+  // 2. Wrap CPU Storage as Tensor (Zero Copy view)
+  auto src_options = at::TensorOptions().dtype(at::kByte).device(at::kCPU);
+  auto src_tensor = at::empty({0}, src_options).set_(src);
+
+  // 3. Create Dummy Tensor on Target Device to trigger Dispatch
+  // We use size {0} so it shouldn't allocate significant memory,
+  // but carries the backend info (HIP/MPS/CUDA/etc.)
+  auto dst_options = at::TensorOptions().dtype(at::kByte).device(device);
+  auto dst_dummy = at::empty({0}, dst_options);
+
+  // 4. Call Native Function via Dispatcher
+  // The dispatcher looks at 'dst_dummy' to decide which backend file to use.
+  Tensor result_tensor = at::native::_usm_share_from(dst_dummy, src_tensor);
+
+  // 5. Unwrap Storage
+  return result_tensor.storage();
 }
 
 } // namespace at
