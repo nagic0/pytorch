@@ -9,7 +9,7 @@ namespace at::native {
 // Implementation for CUDA backend
 // self: dummy tensor on CUDA device (carries device info)
 // src:  CPU storage containing the data
-Tensor usm_share_from_cuda(const Tensor& self, const c10::Storage& src) {
+Tensor usm_share_from_cuda(const Tensor& self, c10::Storage src) {
   void* src_ptr = src.data_ptr().get();
   size_t src_bytes = src.nbytes();
   c10::Device target_device = self.device();
