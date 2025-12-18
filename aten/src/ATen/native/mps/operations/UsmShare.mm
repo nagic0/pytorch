@@ -5,7 +5,8 @@
 namespace at::native {
 
 // Implementation for MPS backend
-Tensor usm_share_from_mps(const Tensor& self, const c10::Storage& src) {
+// src passed by value to match dispatcher signature
+Tensor usm_share_from_mps(const Tensor& self, c10::Storage src) {
   void* ptr = src.data_ptr().get();
   size_t size = src.nbytes();
 
