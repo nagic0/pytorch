@@ -2,6 +2,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/core/DeviceType.h>
+#include <c10/core/Allocator.h>
 
 namespace at::native {
 
@@ -53,23 +54,47 @@ Tensor usm_share_from_cuda(const Tensor& self, const c10::Storage& src) {
       "usm_share_from_cuda: cudaHostGetDevicePointer failed, error: ",
       cudaGetErrorString(err));
 
-  // Create custom deleter
-  auto deleter = [src_ptr](void* p) {
-    cudaError_t err = cudaHostUnregister(src_ptr);
-    if (err != cudaSuccess) {
-      TORCH_WARN(
-          "usm_share_from_cuda: cudaHostUnregister failed, error: ",
-          cudaGetErrorString(err));
-    }
+  // Create a new storage with a custom deleter that also updates src metadata
+  c10::StorageImpl* src_impl = src.unsafeGetStorageImpl();
+  // Increment ref count of src to prevent it from being freed while the new
+  // storage shares its data. The ref count will be decremented in the deleter.
+  c10::raw::intrusive_ptr::incref(src_impl);
+
+  struct DeleterContext {
+    c10::StorageImpl* src_impl{};
+    void* host_ptr{};  // Original CPU pointer for unregister
+    void* device_ptr{};  // Device pointer (not used in deleter, just for reference)
+    c10::Device device;
   };
 
-  // Create storage with device pointer
+  auto* deleter_context = new DeleterContext{src_impl, src_ptr, dev_ptr, actual_device};
+
+  c10::DeleterFnPtr deleter = [](void* ctx) {
+    auto* context = static_cast<DeleterContext*>(ctx);
+    // Set device guard
+    c10::cuda::CUDAGuard device_guard(context->device);
+    // Unregister the host memory using the original host pointer
+    cudaError_t err = cudaHostUnregister(context->host_ptr);
+    if (err != cudaSuccess) {
+      TORCH_WARN(
+          "usm_share_cuda: cudaHostUnregister failed on device ",
+          context->device,
+          " with error: ",
+          cudaGetErrorString(err));
+    }
+    // Decrement the ref count of src
+    c10::raw::intrusive_ptr::decref(context->src_impl);
+    delete context;
+  };
+
+  auto data_ptr = c10::DataPtr(src_ptr, deleter_context, deleter, actual_device);
+
   auto storage_impl = c10::make_intrusive<c10::StorageImpl>(
       c10::StorageImpl::use_byte_size_t(),
       src_bytes,
-      c10::DataPtr(dev_ptr, src_ptr, deleter, actual_device),
+      std::move(data_ptr),
       c10::GetAllocator(c10::DeviceType::CUDA),
-      false);
+      /* resizable */ false);
 
   return at::empty({0}, self.options()).set_(std::move(storage_impl));
 }
