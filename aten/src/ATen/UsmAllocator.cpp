@@ -77,31 +77,18 @@ struct AllocResult {
 
 #ifdef __APPLE__
 static AllocResult allocate_macos(size_t size) {
-  // macOS superpages (2MB) require strict alignment.
-  constexpr size_t kSuperPageSize = 2L * 1024 * 1024;
-  size_t aligned_size = (size + kSuperPageSize - 1) & ~(kSuperPageSize - 1);
-  
   mach_vm_address_t addr = 0;
+  kern_return_t kr = mach_vm_allocate(mach_task_self(), &addr, size, VM_FLAGS_ANYWHERE);
   
-  // 1. Attempt to allocate a 2MB Superpage.
-  // This reduces TLB pressure but may fail if memory is fragmented.
-  kern_return_t kr = mach_vm_allocate(mach_task_self(), &addr, aligned_size, 
-                                      VM_FLAGS_ANYWHERE | VM_FLAGS_SUPERPAGE_SIZE_2MB);
-  
-  if (kr == KERN_SUCCESS) {
-    return {reinterpret_cast<void*>(addr), aligned_size};
-  }
+  // TODO: Consider using superpages on macOS if available
+  TORCH_WARN_ONCE("USM: macOS does not support allocating huge pages. "
+                  "Performance may be suboptimal compared to the default GPU allocator.");
 
-  // 2. Fallback: Standard allocation (usually 16KB pages on M-series).
-  // Reset addr and try again without the SUPERPAGE flag.
-  addr = 0;
-  kr = mach_vm_allocate(mach_task_self(), &addr, aligned_size, VM_FLAGS_ANYWHERE);
-  
   if (kr != KERN_SUCCESS) {
-    TORCH_CHECK(false, "USM: mach_vm_allocate failed for size ", aligned_size, " (mach error: ", kr, ")");
+    TORCH_CHECK(false, "USM: mach_vm_allocate failed for size ", size, " (mach error: ", kr, ")");
   }
   
-  return {reinterpret_cast<void*>(addr), aligned_size};
+  return {reinterpret_cast<void*>(addr), size};
 }
 
 static void deallocate_macos(void* ptr, size_t size) {
