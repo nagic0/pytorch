@@ -1,6 +1,7 @@
 #include <ATen/ATen.h>
 #include <ATen/mps/MPSDevice.h>
 #include <Metal/Metal.h>
+#include <unistd.h>
 
 namespace at::native {
 
@@ -25,32 +26,55 @@ Tensor usm_share_from_mps(const Tensor& self, c10::Storage src) {
   }
 
   // 1. Check Alignment (Critical for Metal NoCopy)
-  // vm_page_size is typically 16KB on Apple Silicon
-  TORCH_CHECK((uintptr_t)ptr % 16384 == 0,
-      "usm_share_from_mps: MPS requires CPU pointer to be 16KB aligned. "
-      "Use torch.empty(..., pin_memory=True) or posix_memalign.");
-
+  int pageSize = getpagesize();
   id<MTLDevice> device = at::mps::MPSDevice::getInstance()->device();
 
   // 2. Create NoCopy Buffer
+  // Length must be page-aligned for newBufferWithBytesNoCopy
+  size_t aligned_size = (size + pageSize - 1) & ~(pageSize - 1);
   id<MTLBuffer> buffer = [device newBufferWithBytesNoCopy:ptr
-                                                   length:size
+                                                   length:aligned_size
                                                   options:MTLResourceStorageModeShared
                                               deallocator:nil];
   
-  // Retain buffer to keep it alive as long as Storage exists
+  TORCH_CHECK(buffer, "usm_share_from_mps: Failed to create MTLBuffer. "
+                      "Ensure size is page-aligned and pointer is page-aligned.");
+  
+  // Explicitly retain the buffer to ensure it lives as long as the Storage.
+  // This is necessary if ARC is enabled (local variable releases it) or if the object is autoreleased.
   CFRetain((CFTypeRef)buffer);
   
-  auto deleter = [buffer](void* p) {
-    CFRelease((CFTypeRef)buffer);
+  // Transfer ownership to void*
+  void* buffer_ptr = (void*)buffer;
+  
+  // Increment ref count of src to prevent it from being freed while the new
+  // storage shares its data. The ref count will be decremented in the deleter.
+  c10::StorageImpl* src_impl = src.unsafeGetStorageImpl();
+  c10::raw::intrusive_ptr::incref(src_impl);
+
+  struct DeleterContext {
+    void* buffer;
+    c10::StorageImpl* src_impl;
+  };
+
+  auto* deleter_context = new DeleterContext{buffer_ptr, src_impl};
+
+  c10::DeleterFnPtr deleter = [](void* ctx) {
+    auto* context = static_cast<DeleterContext*>(ctx);
+    CFRelease((CFTypeRef)context->buffer); // Release the retained reference
+    c10::raw::intrusive_ptr::decref(context->src_impl);
+    delete context;
   };
 
   // 3. Create StorageImpl
+  c10::Allocator* mps_allocator = at::mps::GetMPSAllocator();
+  TORCH_CHECK(mps_allocator, "usm_share_from_mps: MPS Allocator is null");
+
   auto storage_impl = c10::make_intrusive<c10::StorageImpl>(
       c10::StorageImpl::use_byte_size_t(),
       size,
-      c10::DataPtr([buffer contents], buffer, deleter, self.device()),
-      c10::GetAllocator(c10::DeviceType::MPS),
+      c10::DataPtr(buffer_ptr, deleter_context, deleter, self.device()),
+      mps_allocator,
       false);
 
   return at::empty({0}, self.options()).set_(std::move(storage_impl));

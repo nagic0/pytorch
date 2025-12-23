@@ -6,6 +6,7 @@ import logging
 import sys
 import traceback
 import warnings
+import contextlib
 from collections import defaultdict
 from types import ModuleType
 from typing import Any, Callable, Generic, Optional, TYPE_CHECKING
@@ -84,7 +85,13 @@ def _to(self, device, non_blocking=False):
     assert device_module is not None, (
         f"{device.type.upper()} device module is not loaded"
     )
-    with device_module.device(device):
+
+    if device_module == torch.mps:
+        context = contextlib.nullcontext()
+    else:
+        context = device_module.device(device)
+
+    with context:
         if self.is_sparse and hasattr(device_module, "sparse"):
             new_type = getattr(device_module.sparse, self.__class__.__name__)
             indices = getattr(torch.Tensor._indices(self), device.type)(
