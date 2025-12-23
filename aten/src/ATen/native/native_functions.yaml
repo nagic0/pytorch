@@ -15948,4 +15948,6 @@
   variants: function
   dispatch:
     CUDA: usm_share_from_cuda
+    # HIP: usm_share_from_hip
     MPS: usm_share_from_mps
+    # XPU: usm_share_from_xpu

@@ -95,25 +95,19 @@ UsmAllocator::UsmAllocator(WithFd, std::string_view filename, int fd, size_t siz
   }
 
   // USM mode: use mmap + THP + DIO
-  size_t aligned_size = (size + 65535) & ~65535; // Align to 64KB
+  constexpr size_t kHugePageSize = 2L * 1024 * 1024; // 2MB
+  size_t aligned_size = (size + kHugePageSize - 1) & ~(kHugePageSize - 1); // Align to 2MB
   
   // Allocate memory with mmap and enable THP
-  // Use MAP_SHARED and ensure proper alignment for DIO
   base_ptr_ = mmap(nullptr, aligned_size, PROT_READ | PROT_WRITE, 
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (base_ptr_ == MAP_FAILED) {
     TORCH_CHECK(false, "USM: failed to mmap memory of size ", aligned_size);
   }
   
-  // Check if base_ptr_ is properly aligned for DIO (512-byte alignment minimum)
-  if (reinterpret_cast<uintptr_t>(base_ptr_) % 512 != 0) {
-    TORCH_WARN("USM: base_ptr_ is not 512-byte aligned, DIO may fail. base_ptr=", base_ptr_);
-  }
-  
-  // TODO: for test, turn off the thp
   // Enable THP (Transparent Huge Pages) - optional
-  if (madvise(base_ptr_, aligned_size, MADV_NOHUGEPAGE) != 0) {
-    // THP is optional, continue without error
+  if (madvise(base_ptr_, aligned_size, MADV_HUGEPAGE) != 0) {
+    TORCH_WARN("USM: madvise MADV_HUGEPAGE failed: ", c10::utils::str_error(errno), " (", errno, ")");
   }
   
   // Read file content using DIO if filename or fd is provided
