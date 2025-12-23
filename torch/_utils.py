@@ -7,6 +7,7 @@ import math
 import sys
 import traceback
 import warnings
+import contextlib
 from collections import defaultdict
 from collections.abc import Callable
 from types import ModuleType
@@ -83,9 +84,17 @@ def _to(self, device, non_blocking=False):
         return untyped_storage
 
     device_module = getattr(torch, device.type, None)
+
     if device_module is None:
         raise AssertionError(f"{device.type.upper()} device module is not loaded")
-    with device_module.device(device):
+
+    # MPS devices do not support device context managers
+    if device_module == torch.mps:
+        context = contextlib.nullcontext()
+    else:
+        context = device_module.device(device)
+
+    with context:
         if self.is_sparse and hasattr(device_module, "sparse"):
             new_type = getattr(device_module.sparse, self.__class__.__name__)
             indices = getattr(torch.Tensor._indices(self), device.type)(
